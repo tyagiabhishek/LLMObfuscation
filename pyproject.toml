@@ -1,0 +1,9 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests requiring model downloads (slow)",
+]
+filterwarnings = [
+    "ignore::FutureWarning",
+    "ignore::UserWarning",
+]
