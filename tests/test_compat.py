@@ -30,10 +30,37 @@ def test_parse_version_rc():
     assert _parse_version("2.1.0rc1") == (2, 1, 0)
 
 
+def test_parse_version_local_cuda():
+    """PEP 440 local version: 2.1.1+cu121 should parse as (2, 1, 1)."""
+    assert _parse_version("2.1.1+cu121") == (2, 1, 1)
+
+
+def test_parse_version_local_rocm():
+    assert _parse_version("2.4.0+rocm5.6") == (2, 4, 0)
+
+
+def test_parse_version_local_cpu():
+    assert _parse_version("2.1.0+cpu") == (2, 1, 0)
+
+
 def test_parse_version_comparison():
     assert _parse_version("2.1.0") >= _parse_version("2.0.0")
     assert _parse_version("1.26.4") >= _parse_version("1.24.0")
     assert _parse_version("1.26.4") < _parse_version("2.0.0")
+
+
+def test_parse_version_cuda_not_flagged_as_old():
+    """2.1.1+cu121 should NOT be < 2.1.0 — this was the original bug."""
+    assert _parse_version("2.1.1+cu121") >= _parse_version("2.1.0")
+
+
+def test_torch_transformers_interop():
+    """transformers must be able to detect torch for return_tensors='pt'."""
+    from transformers.utils import is_torch_available
+    assert is_torch_available(), (
+        "transformers.utils.is_torch_available() is False — "
+        "tokenizer(return_tensors='pt') will fail"
+    )
 
 
 def test_required_packages_list_not_empty():

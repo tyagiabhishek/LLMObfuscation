@@ -45,8 +45,10 @@ NUMPY_MAX_VERSION = "2.0.0"
 
 def _parse_version(v: str) -> tuple[int, ...]:
     """Parse version string to tuple of ints for comparison.
-    Handles dev/rc suffixes by stripping them."""
-    clean = v.split(".dev")[0].split("rc")[0].split("a")[0].split("b")[0]
+    Handles PEP 440 suffixes: +local (e.g. +cu121), .devN, rcN, aN, bN."""
+    # Strip local version identifier first (e.g. +cu121, +rocm5.6)
+    clean = v.split("+")[0]
+    clean = clean.split(".dev")[0].split("rc")[0].split("a")[0].split("b")[0]
     parts = []
     for p in clean.split("."):
         try:
@@ -108,6 +110,20 @@ def check_environment(verbose: bool = True) -> list[str]:
         from sklearn.metrics import roc_auc_score, roc_curve
     except ImportError:
         issues.append("scikit-learn: roc_auc_score/roc_curve not importable")
+
+    # Check torch/transformers interop — transformers must detect torch
+    try:
+        from transformers.utils import is_torch_available
+        if not is_torch_available():
+            issues.append(
+                "transformers cannot detect torch (is_torch_available() == False). "
+                "This causes 'return_tensors=\"pt\"' to fail. "
+                "Try: pip install --force-reinstall torch transformers"
+            )
+            if verbose:
+                print("  WARNING: transformers.utils.is_torch_available() == False")
+    except ImportError:
+        pass  # very old transformers without this util
 
     if verbose:
         print(f"{'Package':<16} {'Installed':<16} {'Required':<12} {'Status':<20}")
