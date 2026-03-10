@@ -26,9 +26,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # ---------------------------------------------------------------------------
 
 # Minimum versions required — (pip_name, import_name, min_version)
+# NOTE: transformers>=5.0 requires torch>=2.4.0 internally (is_torch_available
+# returns False otherwise, causing misleading "PyTorch is not installed" errors)
 REQUIRED_PACKAGES = [
-    ("torch", "torch", "2.1.0"),
-    ("transformers", "transformers", "4.40.0"),
+    ("torch", "torch", "2.4.0"),
+    ("transformers", "transformers", "4.45.0"),
     ("datasets", "datasets", "3.0.0"),
     ("accelerate", "accelerate", "0.26.0"),
     ("scikit-learn", "sklearn", "1.3.0"),
@@ -37,6 +39,12 @@ REQUIRED_PACKAGES = [
     ("tqdm", "tqdm", "4.60.0"),
     ("trl", "trl", "0.12.0"),
     ("peft", "peft", "0.10.0"),
+]
+
+# Cross-package version constraints that cause confusing errors if violated
+# (transformers_min_version, torch_min_version, error_description)
+CROSS_PACKAGE_CONSTRAINTS = [
+    ("5.0.0", "2.4.0", "transformers>=5.0 requires torch>=2.4.0 (is_torch_available() returns False otherwise)"),
 ]
 
 # numpy 2.0 removed np.float, np.int, etc. — many libraries broke
@@ -111,17 +119,49 @@ def check_environment(verbose: bool = True) -> list[str]:
     except ImportError:
         issues.append("scikit-learn: roc_auc_score/roc_curve not importable")
 
+    # Check cross-package constraints (e.g. transformers 5.x needs torch 2.4+)
+    try:
+        import transformers
+        tf_ver = _parse_version(transformers.__version__)
+        import torch as _torch
+        torch_ver = _parse_version(_torch.__version__)
+        for tf_min, torch_min, desc in CROSS_PACKAGE_CONSTRAINTS:
+            if tf_ver >= _parse_version(tf_min) and torch_ver < _parse_version(torch_min):
+                issues.append(
+                    f"INCOMPATIBLE: {desc}. "
+                    f"You have transformers=={transformers.__version__} + torch=={_torch.__version__}. "
+                    f"Fix: pip install 'torch>={torch_min}'"
+                )
+    except ImportError:
+        pass
+
     # Check torch/transformers interop — transformers must detect torch
     try:
         from transformers.utils import is_torch_available
         if not is_torch_available():
-            issues.append(
-                "transformers cannot detect torch (is_torch_available() == False). "
-                "This causes 'return_tensors=\"pt\"' to fail. "
-                "Try: pip install --force-reinstall torch transformers"
-            )
-            if verbose:
-                print("  WARNING: transformers.utils.is_torch_available() == False")
+            # Diagnose WHY
+            try:
+                import torch as _torch
+                torch_ver = _torch.__version__
+                msg = (
+                    f"transformers cannot detect torch (is_torch_available() == False). "
+                    f"torch {torch_ver} IS installed but transformers is rejecting it. "
+                )
+                # Check if it's the version gate
+                tf_ver = _parse_version(importlib.import_module("transformers").__version__)
+                if tf_ver >= _parse_version("5.0.0"):
+                    msg += (
+                        f"transformers>=5.0 requires torch>=2.4.0. "
+                        f"Fix: pip install 'torch>=2.4.0'"
+                    )
+                else:
+                    msg += "Try: pip install --force-reinstall torch transformers"
+            except ImportError:
+                msg = (
+                    "transformers cannot detect torch. "
+                    "Fix: pip install torch transformers"
+                )
+            issues.append(msg)
     except ImportError:
         pass  # very old transformers without this util
 

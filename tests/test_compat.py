@@ -2,7 +2,9 @@
 
 import numpy as np
 import torch
-from rl_obfuscation import check_environment, _parse_version, REQUIRED_PACKAGES
+from rl_obfuscation import (
+    check_environment, _parse_version, REQUIRED_PACKAGES, CROSS_PACKAGE_CONSTRAINTS,
+)
 
 
 # --- check_environment tests ---
@@ -59,8 +61,27 @@ def test_torch_transformers_interop():
     from transformers.utils import is_torch_available
     assert is_torch_available(), (
         "transformers.utils.is_torch_available() is False — "
-        "tokenizer(return_tensors='pt') will fail"
+        "tokenizer(return_tensors='pt') will fail. "
+        "transformers>=5.0 requires torch>=2.4.0."
     )
+
+
+def test_cross_package_constraints_defined():
+    """Cross-package constraints list should exist and have entries."""
+    assert len(CROSS_PACKAGE_CONSTRAINTS) >= 1
+
+
+def test_current_torch_meets_transformers_constraint():
+    """Current torch version must satisfy transformers' internal requirement."""
+    import transformers
+    tf_ver = _parse_version(transformers.__version__)
+    torch_ver = _parse_version(torch.__version__)
+    for tf_min, torch_min, desc in CROSS_PACKAGE_CONSTRAINTS:
+        if tf_ver >= _parse_version(tf_min):
+            assert torch_ver >= _parse_version(torch_min), (
+                f"torch {torch.__version__} is too old for transformers "
+                f"{transformers.__version__}: {desc}"
+            )
 
 
 def test_required_packages_list_not_empty():
