@@ -328,14 +328,45 @@ def prepare_rl_prompts(
 # 2. Activation Extraction & Aggregation
 # ---------------------------------------------------------------------------
 
+
+def middle_layer_indices(n_layers: int) -> list[int]:
+    """Return indices of the middle 50% of layers.
+
+    Skips the bottom 25% and top 25% of layers, which are typically less
+    informative for probe-based detection (the paper finds mid-to-late layers
+    work best). This halves peak RAM during activation extraction.
+
+    For a 24-layer model: returns layers 6..17 (12 layers).
+    For a 4-layer model: returns layers 1..2 (2 layers).
+    Minimum 1 layer is always returned.
+    """
+    start = n_layers // 4
+    end = n_layers - n_layers // 4
+    if end <= start:
+        # Ensure at least 1 layer for very small models
+        mid = n_layers // 2
+        return [mid]
+    return list(range(start, end))
+
+
 def extract_activations(
     model: AutoModelForCausalLM,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     batch_size: int = 8,
+    layer_indices: Optional[list[int]] = None,
 ) -> dict[int, torch.Tensor]:
     """
-    Extract residual stream activations from all layers using forward hooks.
+    Extract residual stream activations using forward hooks.
+
+    Args:
+        model: The causal LM to extract activations from.
+        input_ids: Tokenized input, shape (n_examples, seq_len).
+        attention_mask: Attention mask, shape (n_examples, seq_len).
+        batch_size: Number of examples to process at once.
+        layer_indices: Which layers to extract. If None, extracts all layers.
+            Use ``middle_layer_indices(n_layers)`` to extract only the middle
+            50% and cut RAM usage roughly in half.
 
     Returns: Dict[layer_idx, Tensor(n_examples, seq_len, d_model)]
     """
@@ -344,7 +375,10 @@ def extract_activations(
     layer_modules = model.model.layers
     n_layers = len(layer_modules)
 
-    all_activations: dict[int, list[torch.Tensor]] = {l: [] for l in range(n_layers)}
+    if layer_indices is None:
+        layer_indices = list(range(n_layers))
+
+    all_activations: dict[int, list[torch.Tensor]] = {l: [] for l in layer_indices}
 
     for start in tqdm(range(0, n_examples, batch_size), desc="Extracting activations"):
         end = min(start + batch_size, n_examples)
@@ -360,22 +394,22 @@ def extract_activations(
                 hook_data[layer_idx] = hidden_states.detach().cpu().float()
             return hook_fn
 
-        for l, layer in enumerate(layer_modules):
-            handles.append(layer.register_forward_hook(make_hook(l)))
+        for l in layer_indices:
+            handles.append(layer_modules[l].register_forward_hook(make_hook(l)))
 
         with torch.no_grad():
             model(input_ids=batch_ids, attention_mask=batch_mask)
 
         for handle in handles:
             handle.remove()
-        for l in range(n_layers):
+        for l in layer_indices:
             all_activations[l].append(hook_data[l])
 
         del batch_ids, batch_mask, hook_data
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    return {l: torch.cat(all_activations[l], dim=0) for l in range(n_layers)}
+    return {l: torch.cat(all_activations[l], dim=0) for l in layer_indices}
 
 
 def aggregate_activations(
@@ -383,12 +417,21 @@ def aggregate_activations(
     attention_mask: torch.Tensor,
     prompt_lengths: torch.Tensor,
     method: str = "mean",
+    free_on_aggregate: bool = False,
 ) -> dict[int, torch.Tensor]:
     """
     Aggregate per-token activations to per-example vectors.
     Only response tokens are included (prompt tokens and padding excluded).
 
-    Supports methods: "mean", "max", "median".
+    Args:
+        activations: Raw per-layer activations from ``extract_activations``.
+        attention_mask: Attention mask, shape (n_examples, seq_len).
+        prompt_lengths: Number of prompt tokens per example.
+        method: Aggregation method — "mean", "max", or "median".
+        free_on_aggregate: If True, delete each layer's raw activation tensor
+            from *activations* after aggregating it. This frees the
+            (n_examples, seq_len, d_model) tensor immediately, roughly halving
+            peak RAM during aggregation.
     """
     n_examples, seq_len = attention_mask.shape
     result = {}
@@ -401,7 +444,8 @@ def aggregate_activations(
         if resp_start < resp_end:
             response_mask[i, resp_start:resp_end] = True
 
-    for layer_idx, acts in activations.items():
+    for layer_idx in list(activations.keys()):
+        acts = activations[layer_idx]
         mask = response_mask.unsqueeze(-1).expand_as(acts)
         if method == "mean":
             masked_acts = acts * mask.float()
@@ -422,6 +466,9 @@ def aggregate_activations(
             result[layer_idx] = torch.stack(agg)
         else:
             raise ValueError(f"Unknown aggregation method: {method}")
+
+        if free_on_aggregate:
+            del activations[layer_idx]
 
     return result
 
@@ -591,7 +638,7 @@ class ProbeRewardModel:
 
             def hook_fn(module, input, output):
                 hidden_states = output[0] if isinstance(output, tuple) else output
-                hook_data["acts"] = hidden_states.detach().float()
+                hook_data["acts"] = hidden_states.detach().cpu().float()
 
             handle = self.model.model.layers[self.layer_idx].register_forward_hook(hook_fn)
             with torch.no_grad():
