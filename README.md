@@ -48,10 +48,73 @@ Original implementation: [cybershiptrooper/RL_Obfuscation](https://github.com/cy
 ## Setup
 
 ```bash
-pip install transformers datasets accelerate torch scikit-learn matplotlib numpy tqdm trl peft
+pip install -r requirements.txt
 ```
 
+Key version constraints:
+
+| Package | Constraint | Reason |
+|---|---|---|
+| `torch` | `>=2.4.0` | Required by transformers >=5.0 |
+| `trl` | `>=0.15.0` | `max_prompt_length` removed from `GRPOConfig` |
+| `peft` | `>=0.14.0` | Fixes `sync_gpu` import with bitsandbytes >=0.44 |
+| `numpy` | `<2.0.0` | numpy 2.0 removed `np.float`/`np.int`, breaking ML libs |
+
+Optional packages (only if needed):
+- `bitsandbytes>=0.44.0` — for quantized training
+- `deepspeed>=0.15.0` — for distributed training (older versions break with torch >=2.4)
+
+Run `check_environment()` at the top of the notebook to catch version issues early.
+
 **Hardware**: Requires a GPU with ≥6GB VRAM for the RL training phase (Qwen2.5-1.5B in float16 + LoRA). Probe training and evaluation work on CPU/MPS.
+
+## Project Structure
+
+```
+rl_obfuscation.py              # Core module — all pipeline functions
+part1_linear_probes.ipynb       # 4-section reproduction notebook
+requirements.txt                # Pinned dependencies
+tests/                          # 124 tests (pytest)
+  conftest.py                   #   Shared fixtures (tiny_model, mock data)
+  test_activations.py           #   Activation extraction and aggregation
+  test_checkpoints.py           #   Checkpoint save/load roundtrips
+  test_compat.py                #   Version checks, cross-package constraints
+  test_config.py                #   Config dataclass
+  test_integration.py           #   End-to-end pipeline with tiny model
+  test_metrics.py               #   TPR@FPR evaluation
+  test_probes.py                #   LinearProbe training and prediction
+  test_rewards.py               #   Reward functions
+checkpoints/                    # Saved probes and models (gitignored)
+```
+
+### RAM Optimizations
+
+Activation extraction is the most memory-intensive step. Three optimizations reduce peak RAM by ~60%:
+
+- **Middle 50% layers only** — `middle_layer_indices(n_layers)` skips the bottom/top 25% of layers, which the paper shows are least informative for probe detection. For a 24-layer model, extracts 12 layers instead of 24.
+- **Streaming aggregation** — `aggregate_activations(free_on_aggregate=True)` deletes each layer's raw `(n, seq_len, d_model)` tensor immediately after aggregating it to `(n, d_model)`.
+- **Immediate CPU offload** — Forward hook activations in `ProbeRewardModel` are moved to CPU as soon as captured, preventing GPU memory buildup during RL reward scoring.
+
+### Checkpointing
+
+Each training section saves checkpoints to `checkpoints/`. On re-run, existing checkpoints are loaded automatically — no retraining needed:
+
+| Checkpoint | Contents |
+|---|---|
+| `checkpoints/base_probes.pt` | Baseline probe weights + training metrics |
+| `checkpoints/base_eval.pt` | TPR@FPR evaluation results + best layer |
+| `checkpoints/obfuscated_model/` | Full HF model (via `save_pretrained`) |
+| `checkpoints/obf_probes.pt` | Retrained probe weights + metrics |
+
+To force a retrain, delete the relevant checkpoint file.
+
+## Running Tests
+
+```bash
+pytest tests/ -v
+```
+
+Integration tests use `trl-internal-testing/tiny-Qwen2ForCausalLM-2.5` (auto-downloaded, ~5MB).
 
 ## References
 
