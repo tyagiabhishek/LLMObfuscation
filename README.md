@@ -59,10 +59,8 @@ Key version constraints:
 | `trl` | `>=0.15.0` | `max_prompt_length` removed from `GRPOConfig` |
 | `peft` | `>=0.14.0` | Fixes `sync_gpu` import with bitsandbytes >=0.44 |
 | `numpy` | `<2.0.0` | numpy 2.0 removed `np.float`/`np.int`, breaking ML libs |
-
-Optional packages (only if needed):
-- `bitsandbytes>=0.44.0` — for quantized training
-- `deepspeed>=0.15.0` — for distributed training (older versions break with torch >=2.4)
+| `bitsandbytes` | `>=0.44.0` | Older versions removed `sync_gpu`, breaking peft |
+| `deepspeed` | `>=0.15.0` | Older versions import removed `torch.distributed.elastic.multiprocessing.log` |
 
 Run `check_environment()` at the top of the notebook to catch version issues early.
 

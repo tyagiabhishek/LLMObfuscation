@@ -76,9 +76,7 @@ Key functions grouped by section:
 pip install -r requirements.txt
 ```
 
-Key version constraints: `torch>=2.4.0`, `trl>=0.15.0` (max_prompt_length removed), `peft>=0.14.0` (bitsandbytes sync_gpu fix), `numpy<2.0.0`.
-
-Optional packages (install only if needed): `bitsandbytes>=0.44.0`, `deepspeed>=0.15.0`.
+Key version constraints: `torch>=2.4.0`, `trl>=0.15.0` (max_prompt_length removed), `peft>=0.14.0` (bitsandbytes sync_gpu fix), `numpy<2.0.0`, `bitsandbytes>=0.44.0` (sync_gpu removal), `deepspeed>=0.15.0` (torch.distributed.elastic fix).
 
 ## Running Tests
 

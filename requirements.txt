@@ -9,6 +9,5 @@ tqdm>=4.60.0
 trl>=0.15.0
 peft>=0.14.0
 
-# Optional — install only if needed, at compatible versions:
-# bitsandbytes>=0.44.0  (if <0.44.0: pair with peft<0.14.0)
-# deepspeed>=0.15.0     (if <0.15.0: breaks with torch>=2.4.0)
+bitsandbytes>=0.44.0
+deepspeed>=0.15.0
