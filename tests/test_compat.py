@@ -1,9 +1,14 @@
 """Compatibility tests: verify package APIs and versions work correctly."""
 
+import importlib
+from unittest import mock
+
 import numpy as np
+import pytest
 import torch
 from rl_obfuscation import (
     check_environment, _parse_version, REQUIRED_PACKAGES, CROSS_PACKAGE_CONSTRAINTS,
+    BNB_PEFT_CONSTRAINT, DEEPSPEED_TORCH_CONSTRAINT,
 )
 
 
@@ -86,6 +91,148 @@ def test_current_torch_meets_transformers_constraint():
 
 def test_required_packages_list_not_empty():
     assert len(REQUIRED_PACKAGES) >= 10
+
+
+def test_trl_min_version_reflects_api():
+    """trl minimum version should be >=0.15.0 (max_prompt_length removed)."""
+    trl_entry = [r for r in REQUIRED_PACKAGES if r[0] == "trl"]
+    assert len(trl_entry) == 1
+    assert _parse_version(trl_entry[0][2]) >= _parse_version("0.15.0")
+
+
+def test_peft_min_version_reflects_bnb_compat():
+    """peft minimum version should be >=0.14.0 (sync_gpu fix)."""
+    peft_entry = [r for r in REQUIRED_PACKAGES if r[0] == "peft"]
+    assert len(peft_entry) == 1
+    assert _parse_version(peft_entry[0][2]) >= _parse_version("0.14.0")
+
+
+def test_grpo_config_no_max_prompt_length():
+    """GRPOConfig in trl>=0.15.0 should not accept max_prompt_length."""
+    from trl import GRPOConfig
+    with pytest.raises(TypeError):
+        GRPOConfig(output_dir="/tmp/test", max_prompt_length=256)
+
+
+def test_grpo_config_accepts_max_completion_length():
+    """GRPOConfig should accept max_completion_length (the replacement)."""
+    from trl import GRPOConfig
+    config = GRPOConfig(output_dir="/tmp/test", max_completion_length=200)
+    assert config.max_completion_length == 200
+
+
+# --- Optional package constraint detection tests ---
+
+def test_bnb_peft_constraint_constants():
+    """Constraint thresholds should be defined."""
+    assert "bnb_breaks_at" in BNB_PEFT_CONSTRAINT
+    assert "peft_fixed_at" in BNB_PEFT_CONSTRAINT
+    assert _parse_version(BNB_PEFT_CONSTRAINT["bnb_breaks_at"]) == (0, 44, 0)
+    assert _parse_version(BNB_PEFT_CONSTRAINT["peft_fixed_at"]) == (0, 14, 0)
+
+
+def test_deepspeed_torch_constraint_constants():
+    """Constraint thresholds should be defined."""
+    assert "torch_breaks_at" in DEEPSPEED_TORCH_CONSTRAINT
+    assert "deepspeed_fixed_at" in DEEPSPEED_TORCH_CONSTRAINT
+    assert _parse_version(DEEPSPEED_TORCH_CONSTRAINT["torch_breaks_at"]) == (2, 4, 0)
+    assert _parse_version(DEEPSPEED_TORCH_CONSTRAINT["deepspeed_fixed_at"]) == (0, 15, 0)
+
+
+def _make_fake_module(version: str):
+    """Create a mock module with a __version__ attribute."""
+    mod = mock.MagicMock()
+    mod.__version__ = version
+    return mod
+
+
+def test_check_environment_detects_bnb_peft_incompatibility():
+    """check_environment should flag bitsandbytes>=0.44 + peft<0.14."""
+    fake_bnb = _make_fake_module("0.44.1")
+    fake_peft = _make_fake_module("0.12.0")
+    original_import = importlib.import_module
+
+    def patched_import(name, *args, **kwargs):
+        if name == "bitsandbytes":
+            return fake_bnb
+        if name == "peft":
+            return fake_peft
+        return original_import(name, *args, **kwargs)
+
+    with mock.patch("importlib.import_module", side_effect=patched_import):
+        issues = check_environment(verbose=False)
+
+    bnb_issues = [i for i in issues if "sync_gpu" in i]
+    assert len(bnb_issues) == 1, f"Expected sync_gpu issue, got: {issues}"
+    assert "peft>=0.14.0" in bnb_issues[0]
+
+
+def test_check_environment_ok_with_compatible_bnb_peft():
+    """No issue when peft is new enough for bitsandbytes."""
+    fake_bnb = _make_fake_module("0.45.0")
+    fake_peft = _make_fake_module("0.14.0")
+    original_import = importlib.import_module
+
+    def patched_import(name, *args, **kwargs):
+        if name == "bitsandbytes":
+            return fake_bnb
+        if name == "peft":
+            return fake_peft
+        return original_import(name, *args, **kwargs)
+
+    with mock.patch("importlib.import_module", side_effect=patched_import):
+        issues = check_environment(verbose=False)
+
+    bnb_issues = [i for i in issues if "sync_gpu" in i]
+    assert len(bnb_issues) == 0
+
+
+def test_check_environment_detects_deepspeed_torch_incompatibility():
+    """check_environment should flag deepspeed<0.15 + torch>=2.4."""
+    fake_ds = _make_fake_module("0.14.5")
+    original_import = importlib.import_module
+
+    def patched_import(name, *args, **kwargs):
+        if name == "deepspeed":
+            return fake_ds
+        return original_import(name, *args, **kwargs)
+
+    # Only triggers if torch >= 2.4.0 (current env has 2.10.0)
+    torch_ver = _parse_version(torch.__version__)
+    if torch_ver < _parse_version("2.4.0"):
+        pytest.skip("torch < 2.4.0, deepspeed constraint not applicable")
+
+    with mock.patch("importlib.import_module", side_effect=patched_import):
+        issues = check_environment(verbose=False)
+
+    ds_issues = [i for i in issues if "deepspeed" in i and "elastic" in i]
+    assert len(ds_issues) == 1, f"Expected deepspeed/elastic issue, got: {issues}"
+    assert "deepspeed>=0.15.0" in ds_issues[0]
+
+
+def test_check_environment_ok_with_compatible_deepspeed():
+    """No issue when deepspeed is new enough for torch."""
+    fake_ds = _make_fake_module("0.16.0")
+    original_import = importlib.import_module
+
+    def patched_import(name, *args, **kwargs):
+        if name == "deepspeed":
+            return fake_ds
+        return original_import(name, *args, **kwargs)
+
+    with mock.patch("importlib.import_module", side_effect=patched_import):
+        issues = check_environment(verbose=False)
+
+    ds_issues = [i for i in issues if "deepspeed" in i and "elastic" in i]
+    assert len(ds_issues) == 0
+
+
+def test_check_environment_skips_missing_optional_packages():
+    """No issue if bitsandbytes/deepspeed are not installed."""
+    # In our env they're not installed, so check_environment should not flag them
+    issues = check_environment(verbose=False)
+    optional_issues = [i for i in issues if "sync_gpu" in i or "elastic" in i]
+    assert len(optional_issues) == 0, f"False positives for uninstalled packages: {optional_issues}"
 
 
 # --- numpy/torch/sklearn API tests ---

@@ -37,8 +37,8 @@ REQUIRED_PACKAGES = [
     ("matplotlib", "matplotlib", "3.7.0"),
     ("numpy", "numpy", "1.24.0"),
     ("tqdm", "tqdm", "4.60.0"),
-    ("trl", "trl", "0.12.0"),
-    ("peft", "peft", "0.10.0"),
+    ("trl", "trl", "0.15.0"),
+    ("peft", "peft", "0.14.0"),
 ]
 
 # Cross-package version constraints that cause confusing errors if violated
@@ -49,6 +49,22 @@ CROSS_PACKAGE_CONSTRAINTS = [
 
 # numpy 2.0 removed np.float, np.int, etc. — many libraries broke
 NUMPY_MAX_VERSION = "2.0.0"
+
+# Optional packages that cause hard-to-diagnose errors at wrong versions.
+# Checked in check_environment() only when both packages are installed.
+# bitsandbytes >=0.44.0 removed cuda_setup.sync_gpu; peft <0.14.0 imports it
+BNB_PEFT_CONSTRAINT = {
+    "bnb_breaks_at": "0.44.0",
+    "peft_fixed_at": "0.14.0",
+    "error": "cannot import name 'sync_gpu'",
+}
+# deepspeed <0.15.0 imports torch.distributed.elastic.multiprocessing.log,
+# removed in torch >=2.4.0
+DEEPSPEED_TORCH_CONSTRAINT = {
+    "torch_breaks_at": "2.4.0",
+    "deepspeed_fixed_at": "0.15.0",
+    "error": "cannot import name 'log' from 'torch.distributed.elastic'",
+}
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
@@ -164,6 +180,41 @@ def check_environment(verbose: bool = True) -> list[str]:
             issues.append(msg)
     except ImportError:
         pass  # very old transformers without this util
+
+    # Check optional packages for known incompatibilities
+    # bitsandbytes + peft: sync_gpu removal
+    try:
+        bnb = importlib.import_module("bitsandbytes")
+        peft_mod = importlib.import_module("peft")
+        bnb_ver = _parse_version(bnb.__version__)
+        peft_ver = _parse_version(peft_mod.__version__)
+        if (bnb_ver >= _parse_version(BNB_PEFT_CONSTRAINT["bnb_breaks_at"])
+                and peft_ver < _parse_version(BNB_PEFT_CONSTRAINT["peft_fixed_at"])):
+            issues.append(
+                f"INCOMPATIBLE: bitsandbytes {bnb.__version__} removed sync_gpu "
+                f"but peft {peft_mod.__version__} still imports it. "
+                f"Fix: pip install 'peft>={BNB_PEFT_CONSTRAINT['peft_fixed_at']}' "
+                f"or 'bitsandbytes<{BNB_PEFT_CONSTRAINT['bnb_breaks_at']}'"
+            )
+    except ImportError:
+        pass  # optional packages, skip if not installed
+
+    # deepspeed + torch: elastic.multiprocessing.log removal
+    try:
+        ds = importlib.import_module("deepspeed")
+        import torch as _torch
+        ds_ver = _parse_version(ds.__version__)
+        torch_ver = _parse_version(_torch.__version__)
+        if (torch_ver >= _parse_version(DEEPSPEED_TORCH_CONSTRAINT["torch_breaks_at"])
+                and ds_ver < _parse_version(DEEPSPEED_TORCH_CONSTRAINT["deepspeed_fixed_at"])):
+            issues.append(
+                f"INCOMPATIBLE: deepspeed {ds.__version__} imports "
+                f"torch.distributed.elastic.multiprocessing.log which was removed "
+                f"in torch>={DEEPSPEED_TORCH_CONSTRAINT['torch_breaks_at']}. "
+                f"Fix: pip install 'deepspeed>={DEEPSPEED_TORCH_CONSTRAINT['deepspeed_fixed_at']}'"
+            )
+    except ImportError:
+        pass  # optional packages, skip if not installed
 
     if verbose:
         print(f"{'Package':<16} {'Installed':<16} {'Required':<12} {'Status':<20}")
