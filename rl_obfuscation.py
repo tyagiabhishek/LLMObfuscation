@@ -800,3 +800,63 @@ def make_combined_reward_fn(
         return combined
 
     return combined_reward_fn
+
+
+# ---------------------------------------------------------------------------
+# 7. Checkpointing
+# ---------------------------------------------------------------------------
+
+DEFAULT_CHECKPOINT_DIR = pathlib.Path("checkpoints")
+
+
+def save_probes(
+    probes: dict[int, LinearProbe],
+    metrics: dict[int, dict],
+    path: pathlib.Path,
+) -> None:
+    """Save probe state dicts and training metrics to a single file."""
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "probe_states": {l: p.state_dict() for l, p in probes.items()},
+        "metrics": metrics,
+        "d_model": next(iter(probes.values())).linear.in_features,
+    }
+    torch.save(data, path)
+
+
+def load_probes(
+    path: pathlib.Path,
+    probe_device: Optional[torch.device] = None,
+) -> tuple[dict[int, LinearProbe], dict[int, dict]]:
+    """Load probes and metrics from a checkpoint file.
+
+    Returns (probes_dict, metrics_dict).
+    """
+    if probe_device is None:
+        probe_device = device
+    data = torch.load(path, map_location=probe_device, weights_only=True)
+    d_model = data["d_model"]
+    probes = {}
+    for l, state_dict in data["probe_states"].items():
+        probe = LinearProbe(d_model)
+        probe.load_state_dict(state_dict)
+        probe.eval()
+        probe.to(probe_device)
+        probes[l] = probe
+    return probes, data["metrics"]
+
+
+def save_eval_results(
+    results: dict,
+    path: pathlib.Path,
+) -> None:
+    """Save evaluation results (metrics dicts, indices, etc.) to a file."""
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(results, path)
+
+
+def load_eval_results(path: pathlib.Path) -> dict:
+    """Load evaluation results from a checkpoint file."""
+    return torch.load(path, weights_only=False)
