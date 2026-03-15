@@ -33,7 +33,7 @@ checkpoints/                    # Runtime checkpoint dir (gitignored)
 3. **RL-Obfuscation**: GRPO via TRL with LoRA, combined reward (probe evasion + quality + length)
 4. **Post-Obfuscation Evaluation**: Original probes on obfuscated model + retrained probes
 
-Each training section has checkpoint save/load — if a checkpoint exists in `checkpoints/`, training is skipped. Delete the checkpoint file to force a retrain.
+Each training section has checkpoint save/load — if a checkpoint exists in `checkpoints/`, training is skipped. Delete the checkpoint file to force a retrain. **Important:** After changing evaluation methodology (e.g. switching to `score_activations`), delete `checkpoints/base_eval.pt` to force re-evaluation with the new scoring method.
 
 ## Key Technical Details
 
@@ -51,7 +51,7 @@ Key functions grouped by section:
 
 - **Environment**: `check_environment()` — validates packages, detects cross-package incompatibilities (transformers/torch, bitsandbytes/peft, deepspeed/torch)
 - **Data**: `prepare_dataset()`, `prepare_rl_prompts()`
-- **Activations**: `middle_layer_indices()`, `extract_activations(layer_indices=...)`, `aggregate_activations(free_on_aggregate=...)`
+- **Activations**: `middle_layer_indices()`, `extract_activations(layer_indices=...)`, `aggregate_activations(free_on_aggregate=...)`, `score_activations(method=...)` — scores per-token then aggregates (paper's method: `S_mean = (1/T) Σ_t σ(w^T h_t + b)`)
 - **Probes**: `LinearProbe`, `train_probe()`, `compute_tpr_at_fpr()`
 - **Rewards**: `ProbeRewardModel`, `keyword_quality_reward()`, `length_reward()`, `make_combined_reward_fn()`
 - **Checkpoints**: `save_probes()`, `load_probes()`, `save_eval_results()`, `load_eval_results()`

@@ -9,6 +9,7 @@ from rl_obfuscation import (
     aggregate_activations,
     compute_tpr_at_fpr,
     extract_activations,
+    score_activations,
     train_probe,
 )
 
@@ -138,4 +139,40 @@ class TestEndToEndPipeline:
         result = compute_tpr_at_fpr(scores, test_labels)
         assert "auroc" in result
         assert "tpr_at_fpr" in result
+        assert 0.0 <= result["auroc"] <= 1.0
+
+    def test_full_pipeline_with_score_activations(self, tiny_model, tiny_tokenizer):
+        """Extract → train on mean → evaluate with per-token scoring."""
+        n = 20
+        texts = [f"text sample {i}" for i in range(n)]
+        tokens = tiny_tokenizer(
+            texts, return_tensors="pt", padding="max_length", max_length=16,
+        )
+        acts = extract_activations(
+            tiny_model, tokens["input_ids"], tokens["attention_mask"], batch_size=4,
+        )
+        prompt_lengths = torch.full((n,), 2, dtype=torch.long)
+        agg = aggregate_activations(
+            acts, tokens["attention_mask"], prompt_lengths, method="mean",
+        )
+
+        labels = torch.tensor([0.0] * (n // 2) + [1.0] * (n // 2))
+        d_model = tiny_model.config.hidden_size
+
+        probe, metrics = train_probe(
+            agg[0], labels, d_model=d_model, n_epochs=5, batch_size=4,
+            train_frac=0.6, probe_device=torch.device("cpu"),
+        )
+
+        # Evaluate with per-token scoring (paper's method)
+        test_idx = metrics["test_idx"]
+        scores = score_activations(
+            acts[0][test_idx], probe,
+            tokens["attention_mask"][test_idx], prompt_lengths[test_idx],
+            method="mean",
+        ).numpy()
+        test_labels = labels[test_idx].numpy()
+
+        result = compute_tpr_at_fpr(scores, test_labels)
+        assert "auroc" in result
         assert 0.0 <= result["auroc"] <= 1.0

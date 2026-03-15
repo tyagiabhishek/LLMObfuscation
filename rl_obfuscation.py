@@ -245,8 +245,8 @@ class Config:
     model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
 
     # Dataset
-    n_safe: int = 200
-    n_harmful: int = 200
+    n_safe: int = 500
+    n_harmful: int = 500
     max_length: int = 256
 
     # Probe training (matches paper: 40 epochs, batch 16, BCE)
@@ -522,6 +522,62 @@ def aggregate_activations(
             del activations[layer_idx]
 
     return result
+
+
+def score_activations(
+    activations: torch.Tensor,
+    probe: "LinearProbe",
+    attention_mask: torch.Tensor,
+    prompt_lengths: torch.Tensor,
+    method: str = "mean",
+) -> torch.Tensor:
+    """
+    Score per-token activations with a probe, then aggregate scores.
+
+    Implements the paper's equation:
+        S_mean = (1/T) Σ_t σ(w^T h_t + b)
+
+    This differs from scoring aggregated activations:
+        σ(w^T mean(h_t) + b) ≠ mean(σ(w^T h_t + b))
+
+    Args:
+        activations: Raw per-token activations, shape (n_examples, seq_len, d_model).
+        probe: Trained LinearProbe.
+        attention_mask: Shape (n_examples, seq_len).
+        prompt_lengths: Number of prompt tokens per example.
+        method: Score aggregation — "mean" or "max".
+
+    Returns:
+        Per-example scores, shape (n_examples,).
+    """
+    probe.eval()
+    n_examples, seq_len = attention_mask.shape
+    probe_device = next(probe.parameters()).device
+
+    # Build response-only mask
+    response_mask = torch.zeros(n_examples, seq_len, dtype=torch.bool)
+    for i in range(n_examples):
+        resp_start = prompt_lengths[i].item()
+        resp_end = int(attention_mask[i].sum().item())
+        if resp_start < resp_end:
+            response_mask[i, resp_start:resp_end] = True
+
+    scores = torch.full((n_examples,), 0.5)
+
+    with torch.no_grad():
+        for i in range(n_examples):
+            resp_acts = activations[i][response_mask[i]]  # (n_resp_tokens, d_model)
+            if resp_acts.shape[0] == 0:
+                continue
+            token_scores = probe.predict(resp_acts.to(probe_device))  # (n_resp_tokens,)
+            if method == "mean":
+                scores[i] = token_scores.mean().cpu()
+            elif method == "max":
+                scores[i] = token_scores.max().cpu()
+            else:
+                raise ValueError(f"Unknown scoring method: {method}")
+
+    return scores
 
 
 # ---------------------------------------------------------------------------

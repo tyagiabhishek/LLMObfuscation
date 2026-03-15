@@ -6,8 +6,8 @@ from rl_obfuscation import Config
 def test_config_defaults():
     c = Config()
     assert c.model_name == "Qwen/Qwen2.5-1.5B-Instruct"
-    assert c.n_safe == 200
-    assert c.n_harmful == 200
+    assert c.n_safe == 500
+    assert c.n_harmful == 500
     assert c.max_length == 256
     assert c.seed == 42
 
