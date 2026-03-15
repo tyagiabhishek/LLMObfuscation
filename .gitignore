@@ -6,3 +6,4 @@ __pycache__/
 grpo_output/
 checkpoints/
 *.png
+!experiments/**/*.png
