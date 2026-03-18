@@ -51,7 +51,7 @@ Key functions grouped by section:
 
 - **Environment**: `check_environment()` — validates packages, detects cross-package incompatibilities (transformers/torch, bitsandbytes/peft, deepspeed/torch)
 - **Data**: `prepare_dataset()`, `prepare_rl_prompts()`
-- **Activations**: `middle_layer_indices()`, `extract_activations(layer_indices=...)`, `aggregate_activations(free_on_aggregate=...)`, `score_activations(method=...)` — scores per-token then aggregates (paper's method: `S_mean = (1/T) Σ_t σ(w^T h_t + b)`)
+- **Activations**: `middle_layer_indices()`, `extract_and_aggregate()` (fused, RAM-efficient), `extract_and_score()` (fused, RAM-efficient), `extract_activations()`, `aggregate_activations()`, `score_activations()` — the `extract_and_*` variants aggregate per-batch during extraction, cutting peak RAM from ~22 GB to ~260 MB for 1000 examples
 - **Probes**: `LinearProbe`, `train_probe()`, `compute_tpr_at_fpr()`
 - **Rewards**: `ProbeRewardModel`, `keyword_quality_reward()`, `length_reward()`, `make_combined_reward_fn()`
 - **Checkpoints**: `save_probes()`, `load_probes()`, `save_eval_results()`, `load_eval_results()`
@@ -59,8 +59,10 @@ Key functions grouped by section:
 ## RAM Optimizations
 
 - `middle_layer_indices(n_layers)` — extracts only middle 50% of layers (~50% RAM reduction)
-- `extract_activations(layer_indices=...)` — hooks only selected layers
-- `aggregate_activations(free_on_aggregate=True)` — deletes raw tensors per-layer during aggregation
+- `extract_and_aggregate()` — **primary optimization**: fuses extraction + aggregation, aggregating per-batch so full `(n_examples, seq_len, d_model)` tensors are never held in memory (~85x RAM reduction vs `extract_activations`)
+- `extract_and_score()` — fuses extraction + per-token scoring + score aggregation, stores only scalar scores per example
+- `extract_activations(layer_indices=...)` — hooks only selected layers (legacy, use `extract_and_aggregate` instead)
+- `aggregate_activations(free_on_aggregate=True)` — deletes raw tensors per-layer during aggregation (legacy)
 - `ProbeRewardModel.score_completions()` — moves hook activations to CPU immediately
 
 ## Simplifications vs Paper

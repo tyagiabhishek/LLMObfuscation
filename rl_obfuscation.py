@@ -463,6 +463,202 @@ def extract_activations(
     return {l: torch.cat(all_activations[l], dim=0) for l in layer_indices}
 
 
+def extract_and_aggregate(
+    model: AutoModelForCausalLM,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    prompt_lengths: torch.Tensor,
+    batch_size: int = 8,
+    layer_indices: Optional[list[int]] = None,
+    method: str = "mean",
+) -> dict[int, torch.Tensor]:
+    """
+    Extract activations and aggregate per-example in one pass.
+
+    Fuses ``extract_activations`` + ``aggregate_activations`` so that full
+    per-token activations are never stored for more than one batch at a time.
+
+    Peak RAM: O(batch_size × seq_len × d_model × n_layers) instead of
+              O(n_examples × seq_len × d_model × n_layers).
+    For Qwen2.5-1.5B with 1000 examples and 14 layers this drops peak
+    usage from ~22 GB to ~260 MB.
+
+    Returns: Dict[layer_idx, Tensor(n_examples, d_model)]
+    """
+    model.eval()
+    n_examples = input_ids.shape[0]
+    layer_modules = model.model.layers
+    n_layers = len(layer_modules)
+
+    if layer_indices is None:
+        layer_indices = list(range(n_layers))
+
+    agg_results: dict[int, list[torch.Tensor]] = {l: [] for l in layer_indices}
+
+    for start in tqdm(range(0, n_examples, batch_size), desc="Extracting & aggregating"):
+        end = min(start + batch_size, n_examples)
+        batch_ids = input_ids[start:end].to(model.device)
+        batch_mask = attention_mask[start:end].to(model.device)
+        batch_prompt_lens = prompt_lengths[start:end]
+
+        hook_data: dict[int, torch.Tensor] = {}
+        handles = []
+
+        def make_hook(layer_idx):
+            def hook_fn(module, input, output):
+                hidden_states = output[0] if isinstance(output, tuple) else output
+                hook_data[layer_idx] = hidden_states.detach().cpu().float()
+            return hook_fn
+
+        for l in layer_indices:
+            handles.append(layer_modules[l].register_forward_hook(make_hook(l)))
+
+        with torch.no_grad():
+            model(input_ids=batch_ids, attention_mask=batch_mask)
+
+        for handle in handles:
+            handle.remove()
+
+        # Build response mask for this batch
+        bs, seq_len = batch_mask.shape
+        batch_mask_cpu = batch_mask.cpu()
+        response_mask = torch.zeros(bs, seq_len, dtype=torch.bool)
+        for i in range(bs):
+            resp_start = batch_prompt_lens[i].item()
+            resp_end = int(batch_mask_cpu[i].sum().item())
+            if resp_start < resp_end:
+                response_mask[i, resp_start:resp_end] = True
+
+        # Aggregate each layer immediately — only (bs, d_model) is kept
+        for l in layer_indices:
+            acts = hook_data[l]
+            mask = response_mask.unsqueeze(-1).expand_as(acts)
+
+            if method == "mean":
+                masked_acts = acts * mask.float()
+                counts = response_mask.sum(dim=1).float().clamp(min=1).unsqueeze(-1)
+                agg = masked_acts.sum(dim=1) / counts
+            elif method == "max":
+                masked_acts = acts.clone()
+                masked_acts[~mask] = float("-inf")
+                agg = masked_acts.max(dim=1).values
+            elif method == "median":
+                agg_list = []
+                for i in range(bs):
+                    resp_acts = acts[i, response_mask[i]]
+                    if resp_acts.shape[0] > 0:
+                        agg_list.append(resp_acts.median(dim=0).values)
+                    else:
+                        agg_list.append(torch.zeros(acts.shape[-1]))
+                agg = torch.stack(agg_list)
+            else:
+                raise ValueError(f"Unknown aggregation method: {method}")
+
+            agg_results[l].append(agg)
+
+        del batch_ids, batch_mask, batch_mask_cpu, hook_data
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    return {l: torch.cat(agg_results[l], dim=0) for l in layer_indices}
+
+
+def extract_and_score(
+    model: AutoModelForCausalLM,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    prompt_lengths: torch.Tensor,
+    probes: dict[int, "LinearProbe"],
+    batch_size: int = 8,
+    layer_indices: Optional[list[int]] = None,
+    method: str = "mean",
+) -> dict[int, torch.Tensor]:
+    """
+    Extract activations, score per-token with probes, and aggregate scores
+    in one pass — without storing full per-token activations.
+
+    Implements the paper's equation per-batch:
+        S_mean = (1/T) Σ_t σ(w^T h_t + b)
+
+    Peak RAM: O(batch_size × seq_len × d_model × n_layers).
+
+    Args:
+        probes: Dict mapping layer index to a trained LinearProbe.
+
+    Returns: Dict[layer_idx, Tensor(n_examples,)] of per-example scores.
+    """
+    model.eval()
+    n_examples = input_ids.shape[0]
+    layer_modules = model.model.layers
+
+    if layer_indices is None:
+        layer_indices = sorted(probes.keys())
+
+    score_results: dict[int, list[torch.Tensor]] = {l: [] for l in layer_indices}
+
+    for start in tqdm(range(0, n_examples, batch_size), desc="Extracting & scoring"):
+        end = min(start + batch_size, n_examples)
+        batch_ids = input_ids[start:end].to(model.device)
+        batch_mask = attention_mask[start:end].to(model.device)
+        batch_prompt_lens = prompt_lengths[start:end]
+
+        hook_data: dict[int, torch.Tensor] = {}
+        handles = []
+
+        def make_hook(layer_idx):
+            def hook_fn(module, input, output):
+                hidden_states = output[0] if isinstance(output, tuple) else output
+                hook_data[layer_idx] = hidden_states.detach().cpu().float()
+            return hook_fn
+
+        for l in layer_indices:
+            handles.append(layer_modules[l].register_forward_hook(make_hook(l)))
+
+        with torch.no_grad():
+            model(input_ids=batch_ids, attention_mask=batch_mask)
+
+        for handle in handles:
+            handle.remove()
+
+        # Build response mask
+        bs, seq_len = batch_mask.shape
+        batch_mask_cpu = batch_mask.cpu()
+        response_mask = torch.zeros(bs, seq_len, dtype=torch.bool)
+        for i in range(bs):
+            resp_start = batch_prompt_lens[i].item()
+            resp_end = int(batch_mask_cpu[i].sum().item())
+            if resp_start < resp_end:
+                response_mask[i, resp_start:resp_end] = True
+
+        # Score per-token and aggregate for each layer
+        for l in layer_indices:
+            acts = hook_data[l]
+            probe = probes[l]
+            probe_device = next(probe.parameters()).device
+            batch_scores = torch.full((bs,), 0.5)
+
+            with torch.no_grad():
+                for i in range(bs):
+                    resp_acts = acts[i][response_mask[i]]
+                    if resp_acts.shape[0] == 0:
+                        continue
+                    token_scores = probe.predict(resp_acts.to(probe_device))
+                    if method == "mean":
+                        batch_scores[i] = token_scores.mean().cpu()
+                    elif method == "max":
+                        batch_scores[i] = token_scores.max().cpu()
+                    else:
+                        raise ValueError(f"Unknown scoring method: {method}")
+
+            score_results[l].append(batch_scores)
+
+        del batch_ids, batch_mask, batch_mask_cpu, hook_data
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    return {l: torch.cat(score_results[l], dim=0) for l in layer_indices}
+
+
 def aggregate_activations(
     activations: dict[int, torch.Tensor],
     attention_mask: torch.Tensor,
