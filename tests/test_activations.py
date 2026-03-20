@@ -1,9 +1,9 @@
-"""Tests for extract_activations, aggregate_activations, score_activations, and middle_layer_indices."""
+"""Tests for extract_activations, aggregate_activations, score_activations, extract_response_tokens, and middle_layer_indices."""
 
 import pytest
 import torch
 import numpy as np
-from rl_obfuscation import aggregate_activations, extract_activations, middle_layer_indices, score_activations, LinearProbe
+from rl_obfuscation import aggregate_activations, extract_activations, extract_response_tokens, middle_layer_indices, score_activations, LinearProbe
 
 
 class TestMiddleLayerIndices:
@@ -288,6 +288,89 @@ class TestExtractActivations:
         )
         for l in acts:
             assert acts[l].dtype == torch.float32
+
+
+@pytest.mark.integration
+class TestExtractResponseTokens:
+    def test_shapes_and_labels(self, tiny_model, tiny_tokenizer):
+        """Per-token features should have d_model columns and expanded labels."""
+        texts = ["Hello world this is a test input with many tokens",
+                 "Goodbye world another test sentence with tokens"]
+        tokens = tiny_tokenizer(
+            texts, return_tensors="pt", padding="max_length", max_length=32,
+        )
+        labels = torch.tensor([0.0, 1.0])
+        # Use prompt_lengths smaller than actual token lengths
+        real_lens = [int(tokens["attention_mask"][i].sum().item()) for i in range(2)]
+        prompt_lengths = torch.tensor([min(2, real_lens[0] - 1), min(3, real_lens[1] - 1)])
+
+        features, token_labels = extract_response_tokens(
+            tiny_model, tokens["input_ids"], tokens["attention_mask"],
+            prompt_lengths, labels, layer_idx=0, batch_size=2,
+        )
+
+        d_model = tiny_model.config.hidden_size
+        assert features.ndim == 2
+        assert features.shape[1] == d_model
+        assert token_labels.shape[0] == features.shape[0]
+        # Total tokens should be sum of response lengths
+        expected_tokens = sum(
+            max(0, real_lens[i] - prompt_lengths[i].item())
+            for i in range(2)
+        )
+        assert features.shape[0] == expected_tokens
+
+    def test_labels_match_examples(self, tiny_model, tiny_tokenizer):
+        """Token labels should inherit from example labels."""
+        texts = ["Hello world test input"]
+        tokens = tiny_tokenizer(
+            texts, return_tensors="pt", padding="max_length", max_length=16,
+        )
+        labels = torch.tensor([1.0])
+        prompt_lengths = torch.tensor([2])
+
+        features, token_labels = extract_response_tokens(
+            tiny_model, tokens["input_ids"], tokens["attention_mask"],
+            prompt_lengths, labels, layer_idx=0,
+        )
+
+        assert (token_labels == 1.0).all()
+
+    def test_hooks_cleaned_up(self, tiny_model, tiny_tokenizer):
+        """No hooks should remain after extraction."""
+        hooks_before = len(tiny_model.model.layers[0]._forward_hooks)
+        texts = ["test input with several tokens here"]
+        tokens = tiny_tokenizer(texts, return_tensors="pt", padding="max_length", max_length=16)
+        labels = torch.tensor([0.0])
+        prompt_lengths = torch.tensor([1])
+
+        extract_response_tokens(
+            tiny_model, tokens["input_ids"], tokens["attention_mask"],
+            prompt_lengths, labels, layer_idx=0,
+        )
+
+        assert len(tiny_model.model.layers[0]._forward_hooks) == hooks_before
+
+    def test_excludes_prompt_tokens(self, tiny_model, tiny_tokenizer):
+        """Varying prompt_lengths should change the number of tokens extracted."""
+        texts = ["Hello world test input"]
+        tokens = tiny_tokenizer(
+            texts, return_tensors="pt", padding="max_length", max_length=16,
+        )
+        labels = torch.tensor([0.0])
+        real_len = int(tokens["attention_mask"][0].sum().item())
+
+        feat_short, _ = extract_response_tokens(
+            tiny_model, tokens["input_ids"], tokens["attention_mask"],
+            torch.tensor([2]), labels, layer_idx=0,
+        )
+        feat_long, _ = extract_response_tokens(
+            tiny_model, tokens["input_ids"], tokens["attention_mask"],
+            torch.tensor([real_len - 1]), labels, layer_idx=0,
+        )
+
+        # Shorter prompt → more response tokens
+        assert feat_short.shape[0] > feat_long.shape[0]
 
 
 class TestScoreActivations:

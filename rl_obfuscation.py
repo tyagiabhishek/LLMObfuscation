@@ -659,6 +659,88 @@ def extract_and_score(
     return {l: torch.cat(score_results[l], dim=0) for l in layer_indices}
 
 
+def extract_response_tokens(
+    model: AutoModelForCausalLM,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    prompt_lengths: torch.Tensor,
+    labels: torch.Tensor,
+    layer_idx: int,
+    batch_size: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Extract per-token response activations for a single layer (paper's method).
+
+    Each response token is treated as an IID sample with its example's label.
+    Processes one layer at a time to minimize RAM (~1 GB per layer vs ~17 GB
+    for all layers).  Call once per layer in the training loop.
+
+    Args:
+        model: Causal LM to extract from.
+        input_ids: Shape (n_examples, seq_len).
+        attention_mask: Shape (n_examples, seq_len).
+        prompt_lengths: Number of prompt tokens per example.
+        labels: Per-example labels, shape (n_examples,).
+        layer_idx: Which transformer layer to hook.
+        batch_size: Forward-pass batch size.
+
+    Returns:
+        (features, token_labels):
+        - features: (total_response_tokens, d_model)
+        - token_labels: (total_response_tokens,)
+    """
+    model.eval()
+    n_examples = input_ids.shape[0]
+    layer_modules = model.model.layers
+
+    all_features: list[torch.Tensor] = []
+    all_labels: list[torch.Tensor] = []
+
+    for start in tqdm(
+        range(0, n_examples, batch_size),
+        desc=f"Extracting tokens (layer {layer_idx})",
+    ):
+        end = min(start + batch_size, n_examples)
+        batch_ids = input_ids[start:end].to(model.device)
+        batch_mask = attention_mask[start:end].to(model.device)
+        batch_prompt_lens = prompt_lengths[start:end]
+        batch_labels = labels[start:end]
+
+        hook_data: dict[str, torch.Tensor] = {}
+
+        def hook_fn(module, input, output):
+            hidden_states = output[0] if isinstance(output, tuple) else output
+            hook_data["acts"] = hidden_states.detach().cpu().float()
+
+        handle = layer_modules[layer_idx].register_forward_hook(hook_fn)
+
+        with torch.no_grad():
+            model(input_ids=batch_ids, attention_mask=batch_mask)
+
+        handle.remove()
+
+        acts = hook_data["acts"]
+        batch_mask_cpu = batch_mask.cpu()
+
+        for i in range(acts.shape[0]):
+            resp_start = batch_prompt_lens[i].item()
+            resp_end = int(batch_mask_cpu[i].sum().item())
+            if resp_start < resp_end:
+                resp_acts = acts[i, resp_start:resp_end]
+                all_features.append(resp_acts)
+                all_labels.append(batch_labels[i].expand(resp_acts.shape[0]))
+
+        del batch_ids, batch_mask, batch_mask_cpu, hook_data, acts
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    if not all_features:
+        d_model = model.config.hidden_size
+        return torch.empty(0, d_model), torch.empty(0)
+
+    return torch.cat(all_features, dim=0), torch.cat(all_labels, dim=0)
+
+
 def aggregate_activations(
     activations: dict[int, torch.Tensor],
     attention_mask: torch.Tensor,
