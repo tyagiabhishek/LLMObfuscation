@@ -80,7 +80,7 @@ Key functions grouped by section:
 pip install -r requirements.txt
 ```
 
-Key version constraints: `torch>=2.4.0`, `trl>=0.15.0` (max_prompt_length removed), `peft>=0.14.0` (bitsandbytes sync_gpu fix), `numpy<2.0.0`, `bitsandbytes>=0.44.0` (sync_gpu removal), `deepspeed>=0.15.0` (torch.distributed.elastic fix).
+Key version constraints: `torch>=2.4.0,<2.11.0` (torch 2.11 removed `torch.amp.custom_fwd` which deepspeed needs), `trl>=0.15.0` (max_prompt_length removed), `peft>=0.14.0` (bitsandbytes sync_gpu fix), `numpy<2.0.0`, `bitsandbytes>=0.44.0` (sync_gpu removal), `deepspeed>=0.15.0` (torch.distributed.elastic fix).
 
 ## Running Tests
 

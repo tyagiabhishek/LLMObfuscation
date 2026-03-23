@@ -65,6 +65,13 @@ DEEPSPEED_TORCH_CONSTRAINT = {
     "deepspeed_fixed_at": "0.15.0",
     "error": "cannot import name 'log' from 'torch.distributed.elastic'",
 }
+# torch >=2.11.0 removed torch.amp.custom_fwd; deepspeed <=0.18.8 uses it
+# at install time (setup.py), so deepspeed fails to even install.
+DEEPSPEED_TORCH_AMP_CONSTRAINT = {
+    "torch_breaks_at": "2.11.0",
+    "deepspeed_last_broken": "0.18.8",
+    "error": "module 'torch.amp' has no attribute 'custom_fwd'",
+}
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
@@ -215,6 +222,31 @@ def check_environment(verbose: bool = True) -> list[str]:
             )
     except ImportError:
         pass  # optional packages, skip if not installed
+
+    # deepspeed + torch >=2.11: torch.amp.custom_fwd removal
+    try:
+        import torch as _torch
+        torch_ver = _parse_version(_torch.__version__)
+        if torch_ver >= _parse_version(DEEPSPEED_TORCH_AMP_CONSTRAINT["torch_breaks_at"]):
+            try:
+                ds = importlib.import_module("deepspeed")
+                ds_ver = _parse_version(ds.__version__)
+                if ds_ver <= _parse_version(DEEPSPEED_TORCH_AMP_CONSTRAINT["deepspeed_last_broken"]):
+                    issues.append(
+                        f"INCOMPATIBLE: torch {_torch.__version__} removed torch.amp.custom_fwd "
+                        f"but deepspeed {ds.__version__} requires it. "
+                        f"Fix: pip install 'torch<{DEEPSPEED_TORCH_AMP_CONSTRAINT['torch_breaks_at']}'"
+                    )
+            except ImportError:
+                # deepspeed not installed — but it will fail to install with this torch
+                issues.append(
+                    f"WARNING: torch {_torch.__version__} is incompatible with "
+                    f"deepspeed<={DEEPSPEED_TORCH_AMP_CONSTRAINT['deepspeed_last_broken']} "
+                    f"(torch.amp.custom_fwd removed). deepspeed will fail to install. "
+                    f"Fix: pip install 'torch<{DEEPSPEED_TORCH_AMP_CONSTRAINT['torch_breaks_at']}'"
+                )
+    except ImportError:
+        pass
 
     if verbose:
         print(f"{'Package':<16} {'Installed':<16} {'Required':<12} {'Status':<20}")

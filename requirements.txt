@@ -1,4 +1,5 @@
-torch>=2.4.0
+# torch 2.11.0 removed torch.amp.custom_fwd which deepspeed uses at install time
+torch>=2.4.0,<2.11.0
 transformers>=4.45.0
 datasets>=3.0.0
 accelerate>=0.26.0
